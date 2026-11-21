@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoAIConsole — Autonomous CLI Coding Agent Controller</title>
+  <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -14,25 +15,17 @@
         <div class="brand">
           <span class="brand-logo" aria-hidden="true">⌘</span>
           <span class="brand-name">AutoAIConsole</span>
-          <span class="badge badge-phase">UX MOCK v1</span>
-        </div>
-        <div class="session-picker">
-          <select id="sessionSelect" aria-label="セッション切替">
-            <option value="s1">#1 ログインAPI実装 &amp; テスト通過</option>
-            <option value="s2">#2 既存リファクタリング (新規)</option>
-          </select>
-          <button id="newSessionBtn" class="btn btn-ghost btn-sm" title="新規セッション">＋</button>
         </div>
       </div>
 
       <div class="topbar-center">
-        <div id="statusPill" class="status-pill state-watching" role="status" aria-live="polite">
+        <div id="statusPill" class="status-pill state-idle" role="status" aria-live="polite">
           <span class="pulse-dot"></span>
-          <span id="statusLabel" class="status-label">AUTONOMOUS 監視中</span>
+          <span id="statusLabel" class="status-label">IDLE 待機中</span>
           <span class="status-divider"></span>
           <span id="heartbeatText" class="status-meta">更新: 0秒前</span>
           <span class="status-divider"></span>
-          <span id="autoCountText" class="status-meta">自動応答: 2回</span>
+          <span id="autoCountText" class="status-meta">自動応答: 0回</span>
         </div>
       </div>
 
@@ -40,7 +33,7 @@
         <div class="model-box" title="Ollama モデル選択 (既定: gemma4:31b-cloud)">
           <span id="ollamaDot" class="conn-dot conn-unknown"></span>
           <select id="modelSelect" aria-label="Ollama モデル">
-            <option value="gemma4:31b-cloud">gemma4:31b-cloud</option>
+            <option value="gemma4:31b-cloud">gemma4:31b-cloud ★</option>
           </select>
         </div>
 
@@ -50,28 +43,9 @@
           <button class="seg-btn" data-mode="manual">手動</button>
         </div>
 
-        <button id="backendModeBtn" class="btn btn-outline btn-sm" title="UXデモと実API(未実装確認)を切替">
-          モード: UXデモ
-        </button>
-
         <button id="settingsBtn" class="btn btn-ghost btn-icon" title="設定" aria-label="設定">⚙</button>
       </div>
     </header>
-
-    <!-- UX Scenario Ribbon -->
-    <div id="scenarioBar" class="scenario-bar">
-      <div class="scenario-left">
-        <span class="scenario-tag">UX体験シミュレータ</span>
-        <button id="btnScenarioA" class="btn btn-scenario">▶ シナリオA: 自律完走ループ</button>
-        <button id="btnScenarioB" class="btn btn-scenario btn-scenario-warn">⚠ シナリオB: 境界検知・相談停止</button>
-        <button id="btnScenarioC" class="btn btn-scenario btn-scenario-user">⌨ シナリオC: ユーザー直接介入</button>
-        <button id="btnScenarioReset" class="btn btn-ghost btn-sm">↺ 初期状態へ</button>
-      </div>
-      <div class="scenario-right">
-        <span id="scenarioHint" class="scenario-hint">クリックして三者協調（ユーザー ⇄ AutoAI ⇄ Coding Agent）のUXを体験できます</span>
-        <button id="toggleScenarioBtn" class="btn btn-ghost btn-sm" title="バーを隠す">✕</button>
-      </div>
-    </div>
 
     <!-- Main Split Workspace -->
     <main class="workspace" id="workspace">
@@ -92,20 +66,15 @@
           <div class="mission-body" id="missionBody">
             <div class="mission-row">
               <span class="mission-key">目的</span>
-              <span class="mission-val" id="missionGoalView">ログイン API にメール形式・パスワード強度バリデーションを追加し、pytest を全件通過させる</span>
+              <span class="mission-val" id="missionGoalView"></span>
             </div>
             <div class="mission-row">
               <span class="mission-key">方針</span>
-              <span class="mission-val" id="missionPolicyView">正常系優先・確認プロンプト (Y/n) や軽微なテスト修正は AutoAI が自律回答して進める</span>
+              <span class="mission-val" id="missionPolicyView"></span>
             </div>
             <div class="mission-row">
               <span class="mission-key">停止境界</span>
-              <div class="boundary-tags" id="missionBoundaryView">
-                <span class="tag-boundary">force push</span>
-                <span class="tag-boundary">ファイル大量削除</span>
-                <span class="tag-boundary">本番DB変更</span>
-                <span class="tag-boundary">仕様の大幅分岐</span>
-              </div>
+              <div class="boundary-tags" id="missionBoundaryView"></div>
             </div>
           </div>
         </div>
@@ -117,11 +86,11 @@
         <div class="chat-footer">
           <div class="quick-chips">
             <button class="chip" data-prompt="テストが全部通るまで自律で進めておいて">テスト通過まで自律進行</button>
-            <button class="chip" data-prompt="今のターミナル状況と進捗を簡潔に要約して">進捗を要約</button>
-            <button class="chip" data-prompt="次の問いかけは慎重に、既存APIの互換性を最優先して答えて">互換性優先の方針追加</button>
+            <button class="chip" data-prompt="今のターミナル画面の状況と進捗を簡潔に要約して">画面状況を要約</button>
+            <button class="chip" data-prompt="続けて。確認プロンプトは自律で答えて進めて">自律進行を再開</button>
           </div>
           <div class="composer">
-            <textarea id="chatInput" rows="2" placeholder="AutoAI (gemma4:31b-cloud) へ目的・方針変更・質問を入力... (Enterで送信 / Shift+Enterで改行)"></textarea>
+            <textarea id="chatInput" rows="2" placeholder="AutoAI (gemma4:31b-cloud) へ目的・指示・質問を入力... (Enterで送信 / Shift+Enterで改行)"></textarea>
             <button id="sendChatBtn" class="btn btn-primary">送信</button>
           </div>
         </div>
@@ -130,71 +99,71 @@
       <!-- Resizable Splitter -->
       <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" title="ドラッグして左右幅を調整"></div>
 
-      <!-- Right Pane: Live Terminal & Monitor -->
+      <!-- Right Pane: Real CLI Terminal (xterm.js + ConPTY) & Live Monitor -->
       <section class="pane pane-terminal" id="paneTerminal" aria-label="子プロセスターミナル画面">
         <!-- Terminal Toolbar -->
         <div class="term-toolbar">
           <div class="term-toolbar-left">
-            <select id="agentPreset" class="select-compact" aria-label="CLI Coding Agent プリセット">
-              <option value="claude">Claude Code (claude)</option>
-              <option value="gemini">Gemini CLI (gemini)</option>
-              <option value="codex">Codex CLI (codex)</option>
-              <option value="opencode">opencode</option>
-              <option value="pwsh">PowerShell (pwsh)</option>
-            </select>
+            <select id="agentPreset" class="select-compact" aria-label="CLI Coding Agent プリセット"></select>
+            <input id="customCmdInput" class="custom-cmd-input hidden" type="text" placeholder="コマンド例: claude --model sonnet" />
             <div class="cwd-pill" title="作業ディレクトリ">
               <span class="cwd-icon">📁</span>
-              <input id="cwdInput" type="text" value="S:\work\develop\sample-api" aria-label="作業ディレクトリ" />
+              <input id="cwdInput" type="text" value="" aria-label="作業ディレクトリ" />
             </div>
           </div>
           <div class="term-toolbar-right">
-            <span id="controlBadge" class="control-badge owner-auto">制御: AutoAI + 直接入力可</span>
-            <button id="resumeAutoBtn" class="btn btn-emerald btn-xs hidden">自律監視を再開</button>
-            <button id="startTermBtn" class="btn btn-outline btn-xs">起動 / 再起動</button>
+            <span id="controlBadge" class="control-badge owner-idle">未起動</span>
+            <button id="resumeAutoBtn" class="btn btn-emerald btn-xs hidden">自律再開</button>
+            <button id="evalNowBtn" class="btn btn-outline btn-xs" title="今のターミナル画面を AutoAI に即時判断させる">今すぐ判断</button>
+            <button id="startTermBtn" class="btn btn-primary btn-xs">起動</button>
+            <button id="stopTermBtn" class="btn btn-ghost btn-xs hidden">停止</button>
             <button id="ctrlCBtn" class="btn btn-danger-soft btn-xs" title="子プロセスへ Ctrl+C を送信">Ctrl+C</button>
-            <button id="clearTermBtn" class="btn btn-ghost btn-xs">クリア</button>
           </div>
         </div>
 
-        <!-- Terminal Viewport -->
-        <div class="terminal-viewport" id="terminalViewport" tabindex="0" aria-label="ターミナル出力領域">
-          <div class="terminal-lines" id="terminalLines"></div>
-          <div class="terminal-cursor-row" id="terminalCursorRow">
-            <span class="term-prompt-prefix" id="termPromptPrefix"></span>
-            <span class="term-cursor"></span>
+        <!-- Real xterm.js Terminal Container (Authentic CLI Coding Agent Screen) -->
+        <div class="xterm-stage" id="xtermStage">
+          <div id="xtermMount" class="xterm-mount"></div>
+          <div id="termEmptyOverlay" class="term-empty-overlay">
+            <div class="term-empty-box">
+              <div class="term-empty-title">CLI Coding Agent ターミナル（実 ConPTY）</div>
+              <p class="term-empty-desc">
+                右上のプリセット（<code>claude</code> / <code>gemini</code> / <code>agy</code> / <code>pwsh</code> 等）と作業フォルダを選び、<strong>起動</strong>を押すと子プロセスで本物のターミナルが開きます。
+              </p>
+              <div class="term-empty-actions">
+                <button id="quickLaunchClaude" class="btn btn-primary btn-sm">Claude Code を起動</button>
+                <button id="quickLaunchGemini" class="btn btn-outline btn-sm">Gemini CLI を起動</button>
+                <button id="quickLaunchAgy" class="btn btn-outline btn-sm">agy を起動</button>
+                <button id="quickLaunchPwsh" class="btn btn-outline btn-sm">PowerShell を起動</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Live Monitor Strip & Direct Terminal Input -->
+        <!-- Compact Live Monitor Strip -->
         <div class="monitor-panel">
           <div class="monitor-strip">
             <div class="monitor-metric">
               <span class="metric-label">監視状態</span>
-              <span id="monStateText" class="metric-value metric-emerald">出力ストリーム監視中</span>
+              <span id="monStateText" class="metric-value">待機中</span>
             </div>
             <div class="monitor-metric">
               <span class="metric-label">無出力経過</span>
-              <span id="monSilenceText" class="metric-value mono">0.4s / 1.8s</span>
+              <span id="monSilenceText" class="metric-value mono">0.0s / 2.5s</span>
             </div>
             <div class="monitor-metric metric-grow">
-              <span class="metric-label">入力待ち検知信頼度</span>
+              <span class="metric-label">入力待ち検知</span>
               <div class="confidence-wrap">
                 <div class="confidence-track">
-                  <div id="monConfBar" class="confidence-fill" style="width: 18%"></div>
+                  <div id="monConfBar" class="confidence-fill" style="width: 0%"></div>
                 </div>
-                <span id="monConfPct" class="metric-value mono">18%</span>
+                <span id="monConfPct" class="metric-value mono">0%</span>
               </div>
             </div>
             <div class="monitor-metric metric-trigger">
-              <span class="metric-label">直近トリガー</span>
-              <span id="monTriggerText" class="metric-value mono truncate">? Run pytest for tests/test_auth.py? (Y/n)</span>
+              <span class="metric-label">直近の観測・判断</span>
+              <span id="monTriggerText" class="metric-value mono truncate">ターミナルを起動すると自律監視が始まります</span>
             </div>
-          </div>
-
-          <div class="direct-input-row">
-            <span class="direct-prompt" title="ここからターミナルへ直接入力できます">USER $</span>
-            <input id="directTermInput" type="text" placeholder="ターミナルへ直接コマンドや回答を入力 (入力すると AutoAI は即座に操作権を譲ります)..." />
-            <button id="sendDirectBtn" class="btn btn-outline btn-sm">直接送信</button>
           </div>
         </div>
       </section>
@@ -252,20 +221,10 @@
         </label>
 
         <label class="field">
-          <span>プロンプト検知の無出力閾値: <strong id="idleThresholdVal">1.8秒</strong></span>
-          <input id="idleThresholdRange" type="range" min="0.5" max="5.0" step="0.1" value="1.8" />
-          <small class="field-hint">この時間だけ出力が止まり、問いかけパターンに合致したら AutoAI が応答判断を開始します。</small>
+          <span>プロンプト検知の無出力閾値: <strong id="idleThresholdVal">2.5秒</strong></span>
+          <input id="idleThresholdRange" type="range" min="1.0" max="10.0" step="0.5" value="2.5" />
+          <small class="field-hint">この時間だけターミナル出力が止まると、AutoAI が画面を読み取り自律回答すべきか判定します。</small>
         </label>
-
-        <div class="field">
-          <span>自律停止する境界ルール（該当時はユーザーへ相談）</span>
-          <div class="check-grid">
-            <label><input type="checkbox" checked /> <code>git push --force</code> / 履歴破壊</label>
-            <label><input type="checkbox" checked /> 大量ファイル削除 (<code>rm -rf</code> 等)</label>
-            <label><input type="checkbox" checked /> 外部環境・本番DBへの変更</label>
-            <label><input type="checkbox" checked /> 仕様・アーキテクチャの大幅分岐</label>
-          </div>
-        </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" data-close="settingsModal">閉じる</button>
@@ -277,6 +236,8 @@
   <!-- Toast Container -->
   <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
+  <script src="/static/vendor/xterm/xterm.js"></script>
+  <script src="/static/vendor/xterm/addon-fit.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

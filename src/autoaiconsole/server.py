@@ -1,37 +1,51 @@
-"""FastAPI server for AutoAIConsole UX mock and UI-first API skeleton."""
+"""FastAPI server for AutoAIConsole production backend (ConPTY + Ollama + WebSockets)."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import httpx
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from autoaiconsole import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, __version__
+from autoaiconsole.ollama_client import fetch_ollama_models
+from autoaiconsole.session import ConsoleSession
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
-app = FastAPI(title="AutoAIConsole", version=__version__)
+session = ConsoleSession()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    session.attach_loop(asyncio.get_running_loop())
+    try:
+        yield
+    finally:
+        session.shutdown()
+
+
+app = FastAPI(title="AutoAIConsole", version=__version__, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 
 class ChatRequest(BaseModel):
     message: str
-    model: str = DEFAULT_OLLAMA_MODEL
 
 
 class TerminalStartRequest(BaseModel):
-    agent_preset: str = "claude"
+    agent_preset: str = "pwsh"
     cwd: str = "."
     command: str | None = None
 
 
 class TerminalInputRequest(BaseModel):
     text: str
-    source: str = Field(default="user", pattern="^(user|autoai)$")
+    press_enter: bool = True
 
 
 class MonitorModeRequest(BaseModel):
@@ -44,16 +58,15 @@ class MissionUpdateRequest(BaseModel):
     boundaries: list[str] = Field(default_factory=list)
 
 
-def _not_implemented(feature: str, detail: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=200,
-        content={
-            "implemented": False,
-            "status": "not_implemented",
-            "feature": feature,
-            "message": f"未実装: {detail}",
-        },
-    )
+class SettingsUpdateRequest(BaseModel):
+    ollama_url: str = DEFAULT_OLLAMA_URL
+    model: str = DEFAULT_OLLAMA_MODEL
+    idle_threshold_sec: float = 2.5
+
+
+class BoundaryResolveRequest(BaseModel):
+    action: str = Field(pattern="^(recommend|allow|custom|abort)$")
+    custom_text: str = ""
 
 
 @app.get("/")
@@ -66,92 +79,155 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "version": __version__,
-        "ui_phase": "ux-mock-v1",
+        "mode": "production",
         "default_model": DEFAULT_OLLAMA_MODEL,
         "default_ollama_url": DEFAULT_OLLAMA_URL,
+        "pty_running": session.pty.is_running,
+    }
+
+
+@app.get("/api/state")
+async def get_state() -> dict[str, Any]:
+    return session.get_full_state()
+
+
+@app.get("/api/screen")
+async def get_screen() -> dict[str, Any]:
+    return {
+        "pty_running": session.pty.is_running,
+        "cols": session.pty.cols,
+        "rows": session.pty.rows,
+        "screen_text": session.pty.get_screen_text(),
     }
 
 
 @app.get("/api/models")
 async def list_models(ollama_url: str = DEFAULT_OLLAMA_URL) -> dict[str, Any]:
-    """Fetch installed Ollama models if reachable; always keep default model selectable."""
-    fallback = [
-        DEFAULT_OLLAMA_MODEL,
-        "gemma4:12b",
-        "gemma4-31b-coder:tuned",
-        "qwen3.5:9b",
-        "qwen2.5-coder:7b",
-    ]
-    base = ollama_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            res = await client.get(f"{base}/api/tags")
-            res.raise_for_status()
-            payload = res.json()
-            names = [m["name"] for m in payload.get("models", []) if m.get("name")]
-            if DEFAULT_OLLAMA_MODEL in names:
-                names = [DEFAULT_OLLAMA_MODEL] + [n for n in names if n != DEFAULT_OLLAMA_MODEL]
-            else:
-                names = [DEFAULT_OLLAMA_MODEL] + names
-            return {
-                "ollama_connected": True,
-                "ollama_url": base,
-                "default_model": DEFAULT_OLLAMA_MODEL,
-                "models": names,
-            }
-    except Exception as exc:
-        return {
-            "ollama_connected": False,
-            "ollama_url": base,
-            "default_model": DEFAULT_OLLAMA_MODEL,
-            "models": fallback,
-            "note": f"Ollama 未接続のためモック候補を表示 ({type(exc).__name__})",
-        }
+    return await fetch_ollama_models(ollama_url)
 
 
 @app.post("/api/chat")
-async def api_chat(req: ChatRequest) -> JSONResponse:
-    return _not_implemented(
-        "ollama_chat",
-        f"Ollama ({req.model}) との実チャット接続は未実装です（次フェーズで実装予定）。UX デモモードで動作を確認できます。",
-    )
+async def api_chat(req: ChatRequest) -> dict[str, Any]:
+    return await session.handle_user_chat(req.message)
 
 
 @app.post("/api/terminal/start")
-async def api_terminal_start(req: TerminalStartRequest) -> JSONResponse:
-    return _not_implemented(
-        "pty_start",
-        f"子プロセス PTY 起動 ({req.agent_preset} @ {req.cwd}) は未実装です（次フェーズで pywinpty 接続予定）。",
+async def api_terminal_start(req: TerminalStartRequest) -> dict[str, Any]:
+    ok, msg = session.start_terminal(
+        preset=req.agent_preset,
+        cwd=req.cwd,
+        custom_command=req.command,
     )
+    return {"ok": ok, "message": msg, "status": session.get_status_payload()}
+
+
+@app.post("/api/terminal/stop")
+async def api_terminal_stop() -> dict[str, Any]:
+    session.stop_terminal()
+    return {"ok": True, "status": session.get_status_payload()}
 
 
 @app.post("/api/terminal/input")
-async def api_terminal_input(req: TerminalInputRequest) -> JSONResponse:
-    return _not_implemented(
-        "pty_input",
-        f"実 PTY への入力送信 ({req.source}: {req.text!r}) は未実装です。",
-    )
+async def api_terminal_input(req: TerminalInputRequest) -> dict[str, Any]:
+    if not session.pty.is_running:
+        return {"ok": False, "message": "ターミナルが起動していません"}
+    ok = await session.pty.send_text_async(req.text, press_enter=req.press_enter)
+    if ok and session.mode == "autonomous" and session.engine_state in ("watching", "thinking"):
+        session.engine_state = "user"
+        session.last_eval_note = "ユーザー直接入力を優先中（AutoAI待機）"
+        session._broadcast_state()
+    return {"ok": ok}
 
 
 @app.post("/api/terminal/interrupt")
-async def api_terminal_interrupt() -> JSONResponse:
-    return _not_implemented(
-        "pty_interrupt",
-        "実 PTY への Ctrl+C 送信は未実装です。",
-    )
+async def api_terminal_interrupt() -> dict[str, Any]:
+    ok = session.send_interrupt()
+    return {"ok": ok}
 
 
 @app.post("/api/monitor/mode")
-async def api_monitor_mode(req: MonitorModeRequest) -> JSONResponse:
-    return _not_implemented(
-        "monitor_mode",
-        f"自律監視エンジン実体のモード切替 ({req.mode}) は未実装です（UI 上のモック状態のみ反映します）。",
-    )
+async def api_monitor_mode(req: MonitorModeRequest) -> dict[str, Any]:
+    session.set_mode(req.mode)
+    return {"ok": True, "status": session.get_status_payload()}
+
+
+@app.post("/api/monitor/resume")
+async def api_monitor_resume() -> dict[str, Any]:
+    session.resume_autonomous()
+    return {"ok": True, "status": session.get_status_payload()}
+
+
+@app.post("/api/monitor/evaluate")
+async def api_monitor_evaluate() -> dict[str, Any]:
+    return await session.evaluate_once(force=True)
+
+
+@app.post("/api/boundary/resolve")
+async def api_boundary_resolve(req: BoundaryResolveRequest) -> dict[str, Any]:
+    return await session.resolve_boundary(req.action, req.custom_text)
 
 
 @app.post("/api/mission")
-async def api_mission(req: MissionUpdateRequest) -> JSONResponse:
-    return _not_implemented(
-        "mission_store",
-        f"ミッションの永続化保存 (goal={req.goal[:24]!r}) は未実装です（UI 上のモック状態のみ反映します）。",
-    )
+async def api_mission(req: MissionUpdateRequest) -> dict[str, Any]:
+    session.update_mission(req.goal, req.policy, req.boundaries)
+    return {"ok": True, "mission": session.mission}
+
+
+@app.post("/api/settings")
+async def api_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
+    session.update_settings(req.ollama_url, req.model, req.idle_threshold_sec)
+    return {"ok": True, "status": session.get_status_payload()}
+
+
+@app.websocket("/ws/terminal")
+async def ws_terminal(websocket: WebSocket) -> None:
+    await websocket.accept()
+    queue = session.subscribe_pty()
+
+    # Replay existing terminal buffer so reload/connect restores full TUI screen
+    replay = session.pty.get_replay()
+    if replay:
+        await websocket.send_json({"type": "output", "data": replay})
+
+    async def writer_task() -> None:
+        while True:
+            chunk = await queue.get()
+            await websocket.send_json({"type": "output", "data": chunk})
+
+    writer = asyncio.create_task(writer_task())
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            mtype = msg.get("type")
+            if mtype == "input":
+                data = str(msg.get("data", ""))
+                if data:
+                    session.handle_user_terminal_input(data)
+            elif mtype == "resize":
+                cols = int(msg.get("cols", 120))
+                rows = int(msg.get("rows", 34))
+                session.pty.resize(cols, rows)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        writer.cancel()
+        session.unsubscribe_pty(queue)
+
+
+@app.websocket("/ws/events")
+async def ws_events(websocket: WebSocket) -> None:
+    await websocket.accept()
+    queue = session.subscribe_events()
+    await websocket.send_json({"type": "init", "state": session.get_full_state()})
+    try:
+        while True:
+            event = await queue.get()
+            await websocket.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        session.unsubscribe_events(queue)

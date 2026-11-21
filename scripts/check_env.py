@@ -33,6 +33,22 @@ def main() -> int:
         return 1
 
     try:
+        import pyte  # noqa: F401
+        pyte_ok = "ok"
+    except ImportError as exc:
+        print(f"[ERROR] pyte not installed: {exc}")
+        return 1
+
+    pty_ok = "not-win32"
+    if sys.platform == "win32":
+        try:
+            import winpty  # noqa: F401
+            pty_ok = "pywinpty available"
+        except ImportError as exc:
+            print(f"[ERROR] pywinpty not installed: {exc}")
+            return 1
+
+    try:
         import webview  # noqa: F401
         gui_shell = "pywebview available"
     except ImportError:
@@ -40,6 +56,7 @@ def main() -> int:
 
     print(f"  OK python : {exe_path}")
     print(f"  OK package: {pkg_path}")
+    print(f"  OK pty    : {pty_ok} / pyte {pyte_ok}")
     print(f"  OK shell  : {gui_shell}")
     return 0
 

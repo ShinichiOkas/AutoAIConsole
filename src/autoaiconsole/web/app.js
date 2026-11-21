@@ -2,27 +2,28 @@
   const DEFAULT_MODEL = "gemma4:31b-cloud";
 
   const state = {
-    mode: "autonomous",          // autonomous | paused | manual
-    engineState: "watching",     // watching | thinking | boundary | user | paused | manual
-    backendMode: "demo",         // demo | live (live calls real backend -> returns 未実装)
-    model: DEFAULT_MODEL,
-    ollamaUrl: "http://127.0.0.1:11434",
-    idleThresholdSec: 1.8,
-    autoReplyCount: 2,
-    lastActivityAt: Date.now(),
-    silenceSec: 0.4,
-    confidence: 18,
-    lastTrigger: "? Run pytest for tests/test_auth.py? (Y/n)",
-    mission: {
-      goal: "ログイン API にメール形式・パスワード強度バリデーションを追加し、pytest を全件通過させる",
-      policy: "正常系優先・確認プロンプト (Y/n) や軽微なテスト修正は AutoAI が自律回答して進める",
-      boundaries: ["force push", "ファイル大量削除", "本番DB変更", "仕様の大幅分岐"],
+    status: {
+      mode: "autonomous",
+      engine_state: "idle",
+      model: DEFAULT_MODEL,
+      ollama_url: "http://127.0.0.1:11434",
+      idle_threshold_sec: 2.5,
+      pty_running: false,
+      pty_command: "",
+      pty_cwd: "",
+      auto_reply_count: 0,
+      silence_sec: 0,
+      confidence: 0,
+      last_trigger: "",
+      last_eval_note: "",
+      elapsed_sec: 0,
     },
-    lineSeq: 0,
-    timers: [],
+    mission: { goal: "", policy: "", boundaries: [] },
+    presets: [],
+    renderedIds: new Set(),
+    sendingChat: false,
   };
 
-  // DOM helpers
   const $ = (id) => document.getElementById(id);
   const el = {
     statusPill: $("statusPill"),
@@ -33,16 +34,20 @@
     settingsModelSelect: $("settingsModelSelect"),
     ollamaDot: $("ollamaDot"),
     ollamaStatusNote: $("ollamaStatusNote"),
-    backendModeBtn: $("backendModeBtn"),
     chatTimeline: $("chatTimeline"),
     chatInput: $("chatInput"),
     sendChatBtn: $("sendChatBtn"),
-    terminalViewport: $("terminalViewport"),
-    terminalLines: $("terminalLines"),
-    directTermInput: $("directTermInput"),
-    sendDirectBtn: $("sendDirectBtn"),
+    agentPreset: $("agentPreset"),
+    customCmdInput: $("customCmdInput"),
+    cwdInput: $("cwdInput"),
     controlBadge: $("controlBadge"),
     resumeAutoBtn: $("resumeAutoBtn"),
+    evalNowBtn: $("evalNowBtn"),
+    startTermBtn: $("startTermBtn"),
+    stopTermBtn: $("stopTermBtn"),
+    ctrlCBtn: $("ctrlCBtn"),
+    xtermMount: $("xtermMount"),
+    termEmptyOverlay: $("termEmptyOverlay"),
     monStateText: $("monStateText"),
     monSilenceText: $("monSilenceText"),
     monConfBar: $("monConfBar"),
@@ -56,470 +61,16 @@
     toastContainer: $("toastContainer"),
   };
 
-  function nowTime() {
-    const d = new Date();
-    return d.toTimeString().slice(0, 8);
-  }
-
-  function clearScheduledTimers() {
-    state.timers.forEach((t) => clearTimeout(t));
-    state.timers = [];
-  }
-
-  function schedule(ms, fn) {
-    const id = setTimeout(fn, ms);
-    state.timers.push(id);
-    return id;
-  }
-
   function toast(message, kind = "info") {
     const div = document.createElement("div");
     div.className = `toast ${kind === "warn" ? "toast-warn" : kind === "error" ? "toast-error" : ""}`;
     div.textContent = message;
     el.toastContainer.appendChild(div);
-    setTimeout(() => div.remove(), 3600);
+    setTimeout(() => div.remove(), 3800);
   }
 
-  function touchActivity() {
-    state.lastActivityAt = Date.now();
-    state.silenceSec = 0;
-  }
-
-  // ========== Status & Live Feedback Rendering ==========
-  function renderStatus() {
-    const pill = el.statusPill;
-    pill.className = "status-pill";
-    const map = {
-      watching: ["state-watching", "AUTONOMOUS 監視中", "出力ストリーム監視中", "metric-emerald"],
-      thinking: ["state-thinking", `THINKING 回答生成中 (${state.model})`, "Ollama で回答を判断中...", "metric-cyan"],
-      boundary: ["state-boundary", "BOUNDARY 境界相談中", "不可逆境界を検知・ユーザー判断待ち", "metric-amber"],
-      user: ["state-user", "USER_INPUT ユーザー操作中", "ユーザー直接入力を優先（AutoAI待機）", "metric-violet"],
-      paused: ["state-paused", "PAUSED 一時停止", "監視一時停止中", ""],
-      manual: ["state-manual", "MANUAL 手動モード", "手動操作モード（自動回答OFF）", ""],
-    };
-    const [cls, label, monText, monCls] = map[state.engineState] || map.watching;
-    pill.classList.add(cls);
-    el.statusLabel.textContent = label;
-    el.autoCountText.textContent = `自動応答: ${state.autoReplyCount}回`;
-
-    el.monStateText.textContent = monText;
-    el.monStateText.className = `metric-value ${monCls}`;
-
-    // Control badge in terminal toolbar
-    if (state.engineState === "user") {
-      el.controlBadge.className = "control-badge owner-user";
-      el.controlBadge.textContent = "制御: ユーザー操作中（AutoAI待機）";
-      el.resumeAutoBtn.classList.remove("hidden");
-    } else if (state.engineState === "boundary") {
-      el.controlBadge.className = "control-badge owner-boundary";
-      el.controlBadge.textContent = "制御: 境界停止中";
-      el.resumeAutoBtn.classList.add("hidden");
-    } else {
-      el.controlBadge.className = "control-badge owner-auto";
-      el.controlBadge.textContent = state.mode === "autonomous" ? "制御: AutoAI + 直接入力可" : "制御: ユーザー手動";
-      el.resumeAutoBtn.classList.add("hidden");
-    }
-
-    // Segmented mode buttons
-    document.querySelectorAll(".seg-btn").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.mode === state.mode);
-    });
-  }
-
-  function renderMonitorMetrics() {
-    const elapsedSec = Math.floor((Date.now() - state.lastActivityAt) / 1000);
-    el.heartbeatText.textContent = `更新: ${elapsedSec}秒前`;
-    el.monSilenceText.textContent = `${state.silenceSec.toFixed(1)}s / ${state.idleThresholdSec.toFixed(1)}s`;
-    el.monConfBar.style.width = `${Math.min(100, Math.max(0, state.confidence))}%`;
-    el.monConfPct.textContent = `${Math.round(state.confidence)}%`;
-    el.monTriggerText.textContent = state.lastTrigger;
-  }
-
-  // 1-second live heartbeat loop (Live Feedback Rule: never >10s stale)
-  setInterval(() => {
-    if (state.engineState === "watching") {
-      state.silenceSec = Math.min(state.idleThresholdSec, state.silenceSec + 0.2);
-    }
-    renderMonitorMetrics();
-  }, 1000);
-
-  // ========== Terminal Rendering ==========
-  function appendTerminalLine(text, kind = "agent", badge = null) {
-    state.lineSeq += 1;
-    const lineId = `term-line-${state.lineSeq}`;
-    const row = document.createElement("div");
-    row.id = lineId;
-    row.className = `term-line term-${kind}`;
-
-    const ts = document.createElement("span");
-    ts.className = "term-ts";
-    ts.textContent = nowTime();
-
-    const content = document.createElement("span");
-    content.className = "term-text";
-
-    if (badge === "autoai") {
-      const b = document.createElement("span");
-      b.className = "line-badge line-badge-auto";
-      b.textContent = "AutoAI →";
-      content.appendChild(b);
-    } else if (badge === "user") {
-      const b = document.createElement("span");
-      b.className = "line-badge line-badge-user";
-      b.textContent = "USER →";
-      content.appendChild(b);
-    }
-    content.appendChild(document.createTextNode(text));
-
-    row.appendChild(ts);
-    row.appendChild(content);
-    el.terminalLines.appendChild(row);
-    el.terminalViewport.scrollTop = el.terminalViewport.scrollHeight;
-    touchActivity();
-    return lineId;
-  }
-
-  function focusTerminalLine(lineId) {
-    const target = document.getElementById(lineId);
-    if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    target.classList.remove("highlight-flash");
-    void target.offsetWidth;
-    target.classList.add("highlight-flash");
-    setTimeout(() => target.classList.remove("highlight-flash"), 1600);
-  }
-
-  // ========== Chat Rendering ==========
-  function appendChatMessage(role, text, extraMeta = "") {
-    const wrap = document.createElement("div");
-    wrap.className = `msg msg-${role}`;
-
-    const meta = document.createElement("div");
-    meta.className = "msg-meta";
-    if (role === "user") {
-      meta.innerHTML = `<span>${nowTime()}</span><strong>あなた</strong>`;
-    } else {
-      meta.innerHTML = `<strong>AutoAI</strong><span class="model-chip">${state.model}</span><span>${nowTime()}</span>${extraMeta}`;
-    }
-
-    const bubble = document.createElement("div");
-    bubble.className = "msg-bubble";
-    bubble.textContent = text;
-
-    wrap.appendChild(meta);
-    wrap.appendChild(bubble);
-    el.chatTimeline.appendChild(wrap);
-    el.chatTimeline.scrollTop = el.chatTimeline.scrollHeight;
-  }
-
-  function appendAutoActionCard({ promptText, reasoning, sentText, confidence, termLineId }) {
-    const card = document.createElement("div");
-    card.className = "msg card-auto";
-    card.innerHTML = `
-      <div class="card-header">
-        <div class="card-title">⚡ 自律回答をターミナルへ送信 <span class="model-chip">検知 ${confidence}%</span></div>
-        <button class="btn btn-ghost btn-xs jump-btn">ターミナル箇所 ↗</button>
-      </div>
-      <div class="card-detail">
-        <div class="card-kv"><strong>問いかけ</strong><span class="mono"></span></div>
-        <div class="card-kv"><strong>判断根拠</strong><span></span></div>
-        <div class="card-kv"><strong>送信内容</strong><span class="sent-pill"></span></div>
-      </div>
-    `;
-    const spans = card.querySelectorAll(".card-kv span");
-    spans[0].textContent = promptText;
-    spans[1].textContent = reasoning;
-    spans[2].textContent = sentText;
-    card.querySelector(".jump-btn").addEventListener("click", () => focusTerminalLine(termLineId));
-    el.chatTimeline.appendChild(card);
-    el.chatTimeline.scrollTop = el.chatTimeline.scrollHeight;
-  }
-
-  function appendBoundaryCard({ title, detectedCmd, riskReason, recommendation, recAnswer, termLineId }) {
-    const card = document.createElement("div");
-    card.className = "msg card-boundary";
-    card.innerHTML = `
-      <div class="card-header">
-        <div class="card-title">⚠ 境界検知により自律停止: ${title}</div>
-        <button class="btn btn-ghost btn-xs jump-btn">該当行 ↗</button>
-      </div>
-      <div class="boundary-box"></div>
-      <div class="card-detail">
-        <div class="card-kv"><strong>停止理由</strong><span></span></div>
-        <div class="card-kv"><strong>推奨案</strong><span></span></div>
-      </div>
-      <div class="boundary-actions">
-        <button class="btn btn-amber btn-sm act-rec">推奨案で回答して再開</button>
-        <button class="btn btn-outline btn-sm act-allow">このまま許可 (y)</button>
-        <button class="btn btn-danger-soft btn-sm act-abort">Ctrl+C で中止</button>
-      </div>
-    `;
-    card.querySelector(".boundary-box").textContent = detectedCmd;
-    const spans = card.querySelectorAll(".card-kv span");
-    spans[0].textContent = riskReason;
-    spans[1].textContent = recommendation;
-    card.querySelector(".jump-btn").addEventListener("click", () => focusTerminalLine(termLineId));
-
-    const actions = card.querySelector(".boundary-actions");
-    const resolveCard = (label) => {
-      actions.innerHTML = `<span class="boundary-resolved">✓ 決定済み: ${label}</span>`;
-    };
-
-    card.querySelector(".act-rec").addEventListener("click", () => {
-      resolveCard(`推奨案を送信 (${recAnswer})`);
-      state.engineState = "watching";
-      state.confidence = 14;
-      state.autoReplyCount += 1;
-      const lid = appendTerminalLine(recAnswer, "autoai", "autoai");
-      appendTerminalLine("✓ Understood. Skipping force push and keeping commit on local branch.", "success");
-      appendAutoActionCard({
-        promptText: detectedCmd,
-        reasoning: "ユーザー判断（推奨案）に従い force push を拒否し、ローカルコミット維持を指示しました。",
-        sentText: recAnswer,
-        confidence: 100,
-        termLineId: lid,
-      });
-      renderStatus();
-      renderMonitorMetrics();
-      toast("推奨案を送信し、自律監視を再開しました");
-    });
-
-    card.querySelector(".act-allow").addEventListener("click", () => {
-      resolveCard("明示許可 (y) を送信");
-      state.engineState = "watching";
-      state.confidence = 10;
-      appendTerminalLine("y", "user", "user");
-      appendTerminalLine("> Proceeding per explicit user approval...", "agent");
-      renderStatus();
-      renderMonitorMetrics();
-      toast("明示許可を送信しました");
-    });
-
-    card.querySelector(".act-abort").addEventListener("click", () => {
-      resolveCard("Ctrl+C で操作を中断");
-      state.engineState = "paused";
-      state.mode = "paused";
-      appendTerminalLine("^C (Interrupted by user from boundary card)", "danger", "user");
-      renderStatus();
-      toast("操作を中断し、一時停止しました", "warn");
-    });
-
-    el.chatTimeline.appendChild(card);
-    el.chatTimeline.scrollTop = el.chatTimeline.scrollHeight;
-  }
-
-  function appendUnimplementedCard(endpoint, message) {
-    const card = document.createElement("div");
-    card.className = "msg card-unimpl";
-    card.innerHTML = `<strong>[実API応答 / UIファースト確認] ${endpoint}</strong><div></div>`;
-    card.querySelector("div").textContent = message;
-    el.chatTimeline.appendChild(card);
-    el.chatTimeline.scrollTop = el.chatTimeline.scrollHeight;
-  }
-
-  // ========== Mission Render ==========
-  function renderMission() {
-    el.missionGoalView.textContent = state.mission.goal;
-    el.missionPolicyView.textContent = state.mission.policy;
-    el.missionBoundaryView.innerHTML = "";
-    state.mission.boundaries.forEach((b) => {
-      const span = document.createElement("span");
-      span.className = "tag-boundary";
-      span.textContent = b;
-      el.missionBoundaryView.appendChild(span);
-    });
-  }
-
-  // ========== Seed Initial Realistic State ==========
-  function seedInitialState() {
-    clearScheduledTimers();
-    el.chatTimeline.innerHTML = "";
-    el.terminalLines.innerHTML = "";
-    state.lineSeq = 0;
-    state.mode = "autonomous";
-    state.engineState = "watching";
-    state.autoReplyCount = 2;
-    state.confidence = 22;
-    state.lastTrigger = "? Run pytest for tests/test_auth.py? (Y/n)";
-
-    renderMission();
-
-    appendTerminalLine("AutoAIConsole PTY session started (preset: claude, cwd: S:\\work\\develop\\sample-api)", "system");
-    appendTerminalLine("$ claude", "agent");
-    appendTerminalLine("Claude Code v1.x — Connected to workspace sample-api", "system");
-    appendTerminalLine("Add email format and password strength validation to login API and make pytest pass.", "autoai", "autoai");
-    appendTerminalLine("> Inspecting src/auth.py and tests/test_auth.py...", "agent");
-    const p1 = appendTerminalLine("? Allow edit to src/auth.py (+28 / -4 lines)? (Y/n)", "prompt");
-    const a1 = appendTerminalLine("y", "autoai", "autoai");
-    appendTerminalLine("✓ Updated src/auth.py", "success");
-    const p2 = appendTerminalLine("? Run pytest for tests/test_auth.py? (Y/n)", "prompt");
-    const a2 = appendTerminalLine("y", "autoai", "autoai");
-    appendTerminalLine("> Running pytest -q tests/test_auth.py ...", "agent");
-    appendTerminalLine("....                                                               [100%] 4 passed in 0.42s", "success");
-
-    appendChatMessage("user", "ログイン API にメール形式とパスワード強度のバリデーションを追加して、pytest を通しておいて。確認は任せるよ。");
-    appendChatMessage(
-      "ai",
-      "了解しました。ミッションを登録し、右ターミナルの Claude Code に実装を指示しました。\n確認プロンプトや軽微な修正は自律で回答し、破壊的操作や仕様分岐の境界だけ相談します。"
-    );
-    appendAutoActionCard({
-      promptText: "? Allow edit to src/auth.py (+28 / -4 lines)? (Y/n)",
-      reasoning: "ミッション対象のログイン API ファイル編集であり、停止境界に該当しないため承認を自動送信。",
-      sentText: "y",
-      confidence: 97,
-      termLineId: a1,
-    });
-    appendAutoActionCard({
-      promptText: "? Run pytest for tests/test_auth.py? (Y/n)",
-      reasoning: "ミッション達成条件（pytest 全件通過）の検証コマンドのため自動実行。",
-      sentText: "y",
-      confidence: 98,
-      termLineId: a2,
-    });
-    appendChatMessage(
-      "ai",
-      "現在の状況: src/auth.py のバリデーション実装と 4 件のテスト通過まで完了しています。追加の指示があればそのまま話しかけてください。"
-    );
-
-    renderStatus();
-    renderMonitorMetrics();
-    void p1;
-    void p2;
-  }
-
-  // ========== UX Scenarios ==========
-  function runScenarioA() {
-    clearScheduledTimers();
-    state.mode = "autonomous";
-    state.engineState = "watching";
-    renderStatus();
-    toast("シナリオA: 自律完走ループを開始します");
-
-    appendChatMessage("user", "ついでに日本語エラーメッセージ対応と境界値テストも追加して、全テスト通して。");
-    appendChatMessage("ai", "了解。Claude Code へ追加要件を投入し、問いかけを監視しながら完走させます。");
-    appendTerminalLine("Add Japanese validation error messages and edge-case tests, then run full pytest.", "autoai", "autoai");
-
-    schedule(900, () => {
-      appendTerminalLine("> Analyzing error responses in src/auth.py...", "agent");
-      state.confidence = 30;
-      renderMonitorMetrics();
-    });
-
-    schedule(1900, () => {
-      const q = "? Which format do you prefer for error response? (1: {detail: str} existing / 2: {errors: list}) [1/2]";
-      appendTerminalLine(q, "prompt");
-      state.engineState = "thinking";
-      state.confidence = 95;
-      state.lastTrigger = q;
-      renderStatus();
-      renderMonitorMetrics();
-    });
-
-    schedule(3400, () => {
-      const lid = appendTerminalLine("1 — Keep existing {detail: str} schema for backward compatibility.", "autoai", "autoai");
-      state.autoReplyCount += 1;
-      state.engineState = "watching";
-      state.confidence = 15;
-      renderStatus();
-      renderMonitorMetrics();
-      appendAutoActionCard({
-        promptText: "? Which format do you prefer for error response? [1/2]",
-        reasoning: "既存クライアントとの互換性を保ちつつ正常系を最短で通すため、既存形式 (1) を自律選択。",
-        sentText: "1 — Keep existing {detail: str} schema...",
-        confidence: 95,
-        termLineId: lid,
-      });
-    });
-
-    schedule(4700, () => {
-      appendTerminalLine("✓ Updated src/auth.py and tests/test_auth.py (+6 edge-case tests)", "success");
-      const q2 = "? Run full test suite `pytest`? (Y/n)";
-      appendTerminalLine(q2, "prompt");
-      state.engineState = "thinking";
-      state.confidence = 98;
-      state.lastTrigger = q2;
-      renderStatus();
-      renderMonitorMetrics();
-    });
-
-    schedule(5800, () => {
-      const lid2 = appendTerminalLine("y", "autoai", "autoai");
-      state.autoReplyCount += 1;
-      state.engineState = "watching";
-      state.confidence = 12;
-      renderStatus();
-      renderMonitorMetrics();
-      appendAutoActionCard({
-        promptText: "? Run full test suite `pytest`? (Y/n)",
-        reasoning: "最終検証のため全テスト実行を自動許可。",
-        sentText: "y",
-        confidence: 98,
-        termLineId: lid2,
-      });
-    });
-
-    schedule(7000, () => {
-      appendTerminalLine("..........                                                         [100%] 10 passed in 0.84s", "success");
-      appendChatMessage("ai", "完了しました！日本語エラーメッセージと境界値テスト 6 件を追加し、全 10 件の pytest が通過しています。");
-      toast("シナリオA: 自律完走しました");
-    });
-  }
-
-  function runScenarioB() {
-    clearScheduledTimers();
-    state.mode = "autonomous";
-    state.engineState = "watching";
-    renderStatus();
-    toast("シナリオB: 境界検知による自律停止を再現します", "warn");
-
-    appendTerminalLine("> Preparing to sync changes with remote repository...", "agent");
-    schedule(700, () => {
-      const cmd = "? Run `git push --force origin main` to overwrite diverged remote history? (y/N)";
-      const lid = appendTerminalLine(cmd, "danger");
-      state.engineState = "thinking";
-      state.confidence = 99;
-      state.lastTrigger = cmd;
-      renderStatus();
-      renderMonitorMetrics();
-
-      schedule(1200, () => {
-        state.engineState = "boundary";
-        renderStatus();
-        appendBoundaryCard({
-          title: "不可逆なリモート履歴上書き (force push)",
-          detectedCmd: cmd,
-          riskReason: "停止境界ルール「force push」に該当。main ブランチのリモート履歴を不可逆的に書き換える操作のため自動応答を停止しました。",
-          recommendation: "force push は拒否 (n) し、ローカルコミットに留めるか別ブランチへ push するよう Coding Agent へ指示する。",
-          recAnswer: "n — Do NOT force push to main. Keep commits local only.",
-          termLineId: lid,
-        });
-      });
-    });
-  }
-
-  function runScenarioC() {
-    clearScheduledTimers();
-    state.mode = "autonomous";
-    state.engineState = "user";
-    state.confidence = 0;
-    state.lastTrigger = "(ユーザー直接介入のため検知を一時譲歩)";
-    renderStatus();
-    renderMonitorMetrics();
-
-    appendTerminalLine("^C", "danger", "user");
-    appendTerminalLine("git diff --stat", "user", "user");
-    appendTerminalLine(" src/auth.py       | 32 ++++++++++++++++++++++++----", "agent");
-    appendTerminalLine(" tests/test_auth.py | 48 +++++++++++++++++++++++++++++++++++++++++", "agent");
-    appendChatMessage(
-      "ai",
-      "ターミナルへの直接入力を検知したため、操作権をあなたへ譲り待機しています。\n確認が終わったら右上の「自律監視を再開」を押すか、ここで「続けて」と指示してください。"
-    );
-    toast("ユーザー直接介入を検知: AutoAI は操作権を譲って待機中");
-  }
-
-  // ========== Backend API Calls (UI-First Real Endpoint Check) ==========
-  async function callBackend(path, body) {
-    const res = await fetch(path, {
+  async function postJson(url, body = {}) {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -527,8 +78,349 @@
     return await res.json();
   }
 
+  // ========== Real xterm.js Setup (Authentic CLI Coding Agent Screen) ==========
+  const term = new window.Terminal({
+    cursorBlink: true,
+    cursorStyle: "bar",
+    scrollback: 5000,
+    fontFamily: '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Consolas", "MS Gothic", monospace',
+    fontSize: 13,
+    lineHeight: 1.28,
+    convertEol: false,
+    allowProposedApi: true,
+    theme: {
+      background: "#040507",
+      foreground: "#e5e7eb",
+      cursor: "#38bdf8",
+      cursorAccent: "#040507",
+      selectionBackground: "rgba(56, 189, 248, 0.3)",
+      black: "#090a0f",
+      red: "#f87171",
+      green: "#34d399",
+      yellow: "#facc15",
+      blue: "#60a5fa",
+      magenta: "#c084fc",
+      cyan: "#22d3ee",
+      white: "#e5e7eb",
+      brightBlack: "#64748b",
+      brightRed: "#fca5a5",
+      brightGreen: "#6ee7b7",
+      brightYellow: "#fde047",
+      brightBlue: "#93c5fd",
+      brightMagenta: "#d8b4fe",
+      brightCyan: "#67e8f9",
+      brightWhite: "#ffffff",
+    },
+  });
+
+  const fitAddon = new window.FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(el.xtermMount);
+
+  let termWs = null;
+  let eventsWs = null;
+
+  function sendTerminalResize() {
+    try {
+      fitAddon.fit();
+      if (termWs && termWs.readyState === WebSocket.OPEN) {
+        termWs.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    } catch {
+      // Ignore transient fit errors while hidden
+    }
+  }
+
+  // Handle copy/paste cleanly inside xterm.js
+  term.attachCustomKeyEventHandler((ev) => {
+    if (ev.type === "keydown" && ev.ctrlKey && ev.key.toLowerCase() === "c" && term.hasSelection()) {
+      navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
+      return false;
+    }
+    if (ev.type === "keydown" && ev.ctrlKey && ev.key.toLowerCase() === "v") {
+      navigator.clipboard?.readText().then((txt) => {
+        if (txt && termWs && termWs.readyState === WebSocket.OPEN) {
+          termWs.send(JSON.stringify({ type: "input", data: txt }));
+        }
+      }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
+
+  term.onData((data) => {
+    if (termWs && termWs.readyState === WebSocket.OPEN) {
+      termWs.send(JSON.stringify({ type: "input", data }));
+    }
+  });
+
+  function wsUrl(path) {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${location.host}${path}`;
+  }
+
+  function connectTerminalWs() {
+    termWs = new WebSocket(wsUrl("/ws/terminal"));
+    termWs.onopen = () => {
+      sendTerminalResize();
+    };
+    termWs.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "output" && typeof msg.data === "string") {
+          term.write(msg.data);
+        }
+      } catch {
+        // Ignore malformed frame
+      }
+    };
+    termWs.onclose = () => {
+      setTimeout(connectTerminalWs, 1500);
+    };
+  }
+
+  function connectEventsWs() {
+    eventsWs = new WebSocket(wsUrl("/ws/events"));
+    eventsWs.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "init" && msg.state) {
+          applyFullState(msg.state);
+        } else if (msg.type === "status" && msg.status) {
+          state.status = msg.status;
+          renderStatus();
+        } else if (msg.type === "mission" && msg.mission) {
+          state.mission = msg.mission;
+          renderMission();
+        } else if (msg.type === "timeline_item" && msg.item) {
+          appendTimelineItem(msg.item);
+        } else if (msg.type === "boundary_resolved") {
+          markBoundaryResolved(msg.id, msg.label);
+        } else if (msg.type === "terminal_reset") {
+          term.reset();
+          setTimeout(() => {
+            sendTerminalResize();
+            term.focus();
+          }, 50);
+        }
+      } catch {
+        // Ignore malformed event
+      }
+    };
+    eventsWs.onclose = () => {
+      setTimeout(connectEventsWs, 1500);
+    };
+  }
+
+  // ========== Rendering ==========
+  function renderMission() {
+    el.missionGoalView.textContent = state.mission.goal || "";
+    el.missionPolicyView.textContent = state.mission.policy || "";
+    el.missionBoundaryView.innerHTML = "";
+    (state.mission.boundaries || []).forEach((b) => {
+      const span = document.createElement("span");
+      span.className = "tag-boundary";
+      span.textContent = b;
+      el.missionBoundaryView.appendChild(span);
+    });
+  }
+
+  function renderPresets(presets) {
+    if (!presets || !presets.length) return;
+    state.presets = presets;
+    const prev = el.agentPreset.value;
+    el.agentPreset.innerHTML = "";
+    presets.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.available ? p.label : `${p.label} (未検出)`;
+      el.agentPreset.appendChild(opt);
+    });
+    if (prev && presets.some((p) => p.id === prev)) {
+      el.agentPreset.value = prev;
+    } else {
+      const firstAvail = presets.find((p) => p.available && p.id !== "custom");
+      if (firstAvail) el.agentPreset.value = firstAvail.id;
+    }
+    el.customCmdInput.classList.toggle("hidden", el.agentPreset.value !== "custom");
+  }
+
+  function renderStatus() {
+    const s = state.status;
+    el.statusPill.className = "status-pill";
+    const map = {
+      idle: ["state-idle", "IDLE ターミナル未起動", "未起動", ""],
+      watching: ["state-watching", "AUTONOMOUS 監視中", "出力ストリーム監視中", "metric-emerald"],
+      thinking: ["state-thinking", `THINKING 判断中 (${s.model})`, "Ollama で画面解析中...", "metric-cyan"],
+      boundary: ["state-boundary", "BOUNDARY 境界相談中", "境界検知・ユーザー判断待ち", "metric-amber"],
+      user: ["state-user", "USER_INPUT ユーザー操作中", "ユーザー直接入力を優先中", "metric-violet"],
+      paused: ["state-paused", "PAUSED 一時停止", "監視一時停止中", ""],
+      manual: ["state-manual", "MANUAL 手動モード", "手動操作モード（自動回答OFF）", ""],
+    };
+    const [cls, label, monText, monCls] = map[s.engine_state] || map.idle;
+    el.statusPill.classList.add(cls);
+    el.statusLabel.textContent = label;
+    el.heartbeatText.textContent = `更新: ${s.elapsed_sec ?? 0}秒前`;
+    el.autoCountText.textContent = `自動応答: ${s.auto_reply_count ?? 0}回`;
+
+    el.monStateText.textContent = monText;
+    el.monStateText.className = `metric-value ${monCls}`;
+    el.monSilenceText.textContent = `${Number(s.silence_sec || 0).toFixed(1)}s / ${Number(s.idle_threshold_sec || 2.5).toFixed(1)}s`;
+    el.monConfBar.style.width = `${Math.min(100, Math.max(0, s.confidence || 0))}%`;
+    el.monConfPct.textContent = `${Math.round(s.confidence || 0)}%`;
+    el.monTriggerText.textContent = s.last_eval_note || s.last_trigger || "";
+
+    // Terminal overlay & buttons
+    el.termEmptyOverlay.classList.toggle("hidden", Boolean(s.pty_running));
+    el.startTermBtn.textContent = s.pty_running ? "再起動" : "起動";
+    el.stopTermBtn.classList.toggle("hidden", !s.pty_running);
+    el.evalNowBtn.disabled = !s.pty_running;
+    el.ctrlCBtn.disabled = !s.pty_running;
+
+    if (!el.cwdInput.value && s.pty_cwd) {
+      el.cwdInput.value = s.pty_cwd;
+    }
+
+    if (!s.pty_running) {
+      el.controlBadge.className = "control-badge owner-idle";
+      el.controlBadge.textContent = "未起動";
+      el.resumeAutoBtn.classList.add("hidden");
+    } else if (s.engine_state === "user") {
+      el.controlBadge.className = "control-badge owner-user";
+      el.controlBadge.textContent = "ユーザー操作中";
+      el.resumeAutoBtn.classList.remove("hidden");
+    } else if (s.engine_state === "boundary") {
+      el.controlBadge.className = "control-badge owner-boundary";
+      el.controlBadge.textContent = "境界停止中";
+      el.resumeAutoBtn.classList.add("hidden");
+    } else {
+      el.controlBadge.className = "control-badge owner-auto";
+      el.controlBadge.textContent = s.mode === "autonomous" ? "AutoAI 監視中" : "手動";
+      el.resumeAutoBtn.classList.add("hidden");
+    }
+
+    document.querySelectorAll(".seg-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.mode === s.mode);
+    });
+  }
+
+  function appendTimelineItem(item) {
+    if (!item || (item.id && state.renderedIds.has(item.id))) return;
+    if (item.id) state.renderedIds.add(item.id);
+
+    if (item.kind === "user" || item.kind === "ai") {
+      const wrap = document.createElement("div");
+      wrap.className = `msg msg-${item.kind}`;
+      const meta = document.createElement("div");
+      meta.className = "msg-meta";
+      if (item.kind === "user") {
+        meta.innerHTML = `<span>${item.time || ""}</span><strong>あなた</strong>`;
+      } else {
+        meta.innerHTML = `<strong>AutoAI</strong><span class="model-chip">${item.model || state.status.model}</span><span>${item.time || ""}</span>`;
+      }
+      const bubble = document.createElement("div");
+      bubble.className = "msg-bubble";
+      bubble.textContent = item.text || "";
+      wrap.appendChild(meta);
+      wrap.appendChild(bubble);
+      el.chatTimeline.appendChild(wrap);
+    } else if (item.kind === "system") {
+      const div = document.createElement("div");
+      div.className = "msg msg-system";
+      div.textContent = `${item.time ? `[${item.time}] ` : ""}${item.text || ""}`;
+      el.chatTimeline.appendChild(div);
+    } else if (item.kind === "error") {
+      const div = document.createElement("div");
+      div.className = "msg msg-error";
+      div.textContent = item.text || "";
+      el.chatTimeline.appendChild(div);
+    } else if (item.kind === "auto_action") {
+      const card = document.createElement("div");
+      card.className = "msg card-auto";
+      card.innerHTML = `
+        <div class="card-header">
+          <div class="card-title">⚡ 自律回答をターミナルへ送信 <span class="model-chip">検知 ${item.confidence ?? 0}%</span></div>
+          <span class="msg-meta">${item.time || ""}</span>
+        </div>
+        <div class="card-detail">
+          <div class="card-kv"><strong>問いかけ</strong><span class="mono"></span></div>
+          <div class="card-kv"><strong>判断根拠</strong><span></span></div>
+          <div class="card-kv"><strong>送信内容</strong><span class="sent-pill"></span></div>
+        </div>
+      `;
+      const spans = card.querySelectorAll(".card-kv span");
+      spans[0].textContent = item.prompt_text || "";
+      spans[1].textContent = item.reasoning || "";
+      spans[2].textContent = item.sent_text || "";
+      el.chatTimeline.appendChild(card);
+    } else if (item.kind === "boundary") {
+      const card = document.createElement("div");
+      card.className = "msg card-boundary";
+      card.dataset.boundaryId = item.id || "";
+      card.innerHTML = `
+        <div class="card-header">
+          <div class="card-title">⚠ 境界検知により自律停止: <span class="b-title"></span></div>
+          <span class="msg-meta">${item.time || ""}</span>
+        </div>
+        <div class="boundary-box"></div>
+        <div class="card-detail">
+          <div class="card-kv"><strong>停止理由</strong><span></span></div>
+          <div class="card-kv"><strong>推奨案</strong><span></span></div>
+        </div>
+        <div class="boundary-actions"></div>
+      `;
+      card.querySelector(".b-title").textContent = item.title || "";
+      card.querySelector(".boundary-box").textContent = item.detected_cmd || "";
+      const spans = card.querySelectorAll(".card-kv span");
+      spans[0].textContent = item.risk_reason || "";
+      spans[1].textContent = item.recommendation || "";
+
+      const actions = card.querySelector(".boundary-actions");
+      if (item.resolved) {
+        actions.innerHTML = `<span class="boundary-resolved">✓ 決定済み: ${item.resolved}</span>`;
+      } else {
+        actions.innerHTML = `
+          <button class="btn btn-amber btn-sm act-rec">推奨案で回答して再開</button>
+          <button class="btn btn-outline btn-sm act-allow">このまま許可 (y)</button>
+          <button class="btn btn-danger-soft btn-sm act-abort">Ctrl+C で中止</button>
+        `;
+        actions.querySelector(".act-rec").addEventListener("click", () => postJson("/api/boundary/resolve", { action: "recommend" }));
+        actions.querySelector(".act-allow").addEventListener("click", () => postJson("/api/boundary/resolve", { action: "allow" }));
+        actions.querySelector(".act-abort").addEventListener("click", () => postJson("/api/boundary/resolve", { action: "abort" }));
+      }
+      el.chatTimeline.appendChild(card);
+    }
+
+    el.chatTimeline.scrollTop = el.chatTimeline.scrollHeight;
+  }
+
+  function markBoundaryResolved(id, label) {
+    const card = el.chatTimeline.querySelector(`[data-boundary-id="${id}"]`);
+    if (!card) return;
+    const actions = card.querySelector(".boundary-actions");
+    if (actions) {
+      actions.innerHTML = "";
+      const span = document.createElement("span");
+      span.className = "boundary-resolved";
+      span.textContent = `✓ 決定済み: ${label}`;
+      actions.appendChild(span);
+    }
+  }
+
+  function applyFullState(full) {
+    if (full.status) state.status = full.status;
+    if (full.mission) state.mission = full.mission;
+    if (full.presets) renderPresets(full.presets);
+    renderMission();
+    renderStatus();
+    if (Array.isArray(full.timeline)) {
+      full.timeline.forEach(appendTimelineItem);
+    }
+  }
+
+  // ========== Ollama Models ==========
   async function loadModels(customUrl) {
-    const url = customUrl || state.ollamaUrl;
+    const url = customUrl || state.status.ollama_url || "http://127.0.0.1:11434";
     el.ollamaDot.className = "conn-dot conn-unknown";
     el.ollamaStatusNote.textContent = "Ollama へ接続確認中...";
     try {
@@ -543,206 +435,127 @@
           opt.textContent = m === DEFAULT_MODEL ? `${m} ★` : m;
           sel.appendChild(opt);
         });
-        sel.value = models.includes(state.model) ? state.model : DEFAULT_MODEL;
+        sel.value = models.includes(state.status.model) ? state.status.model : DEFAULT_MODEL;
       });
-      state.model = el.modelSelect.value;
-
       if (data.ollama_connected) {
         el.ollamaDot.className = "conn-dot conn-ok";
         el.ollamaStatusNote.textContent = `Ollama 接続済み (${models.length} モデル検出 / 既定: ${DEFAULT_MODEL})`;
       } else {
         el.ollamaDot.className = "conn-dot conn-mock";
-        el.ollamaStatusNote.textContent = data.note || "Ollama 未接続（モック候補を表示）";
+        el.ollamaStatusNote.textContent = data.note || "Ollama 未接続";
       }
     } catch {
       el.ollamaDot.className = "conn-dot conn-mock";
-      el.ollamaStatusNote.textContent = "バックエンド未起動のため既定モデル候補を表示中";
+      el.ollamaStatusNote.textContent = "モデル取得に失敗しました";
     }
   }
 
   // ========== User Actions ==========
-  async function handleSendChat() {
+  async function startTerminalWith(presetOverride) {
+    const preset = presetOverride || el.agentPreset.value || "pwsh";
+    if (presetOverride) {
+      el.agentPreset.value = presetOverride;
+      el.customCmdInput.classList.toggle("hidden", presetOverride !== "custom");
+    }
+    const cwd = el.cwdInput.value.trim() || ".";
+    const command = preset === "custom" ? el.customCmdInput.value.trim() : null;
+    const res = await postJson("/api/terminal/start", { agent_preset: preset, cwd, command });
+    if (!res.ok) {
+      toast(res.message || "ターミナル起動に失敗しました", "error");
+      return;
+    }
+    toast(res.message || "ターミナルを起動しました");
+    setTimeout(() => {
+      sendTerminalResize();
+      term.focus();
+    }, 100);
+  }
+
+  async function sendChat() {
+    if (state.sendingChat) return;
     const text = el.chatInput.value.trim();
     if (!text) return;
     el.chatInput.value = "";
-    appendChatMessage("user", text);
-
-    if (state.backendMode === "live") {
-      try {
-        const resp = await callBackend("/api/chat", { message: text, model: state.model });
-        appendUnimplementedCard("POST /api/chat", resp.message);
-      } catch (err) {
-        appendUnimplementedCard("POST /api/chat", `通信エラー: ${err}`);
+    state.sendingChat = true;
+    el.sendChatBtn.disabled = true;
+    try {
+      const res = await postJson("/api/chat", { message: text });
+      if (!res.ok && res.error) {
+        toast(`チャットエラー: ${res.error}`, "error");
       }
-      return;
+    } catch (err) {
+      toast(`通信エラー: ${err}`, "error");
+    } finally {
+      state.sendingChat = false;
+      el.sendChatBtn.disabled = false;
     }
-
-    // Demo UX response
-    if (text.includes("続けて") || text.includes("再開")) {
-      state.mode = "autonomous";
-      state.engineState = "watching";
-      renderStatus();
-      appendChatMessage("ai", "自律監視を再開しました。ターミナルの出力を引き続き監視します。");
-      return;
-    }
-    if (text.includes("要約")) {
-      appendChatMessage(
-        "ai",
-        `【進捗要約】\n・使用モデル: ${state.model}\n・現在の状態: ${el.statusLabel.textContent}\n・これまでの自動応答: ${state.autoReplyCount} 回\n・直近の検知トリガー: ${state.lastTrigger}`
-      );
-      return;
-    }
-
-    state.engineState = "thinking";
-    renderStatus();
-    schedule(700, () => {
-      const lid = appendTerminalLine(text, "autoai", "autoai");
-      state.engineState = "watching";
-      renderStatus();
-      appendChatMessage(
-        "ai",
-        `了解しました。その指示を現在のミッション文脈に反映し、右の Coding Agent へ送信しました（モデル: ${state.model}）。問いかけが来たら自動で対応します。`
-      );
-      appendTerminalLine(`> Received instruction from AutoAI: "${text.slice(0, 60)}"`, "agent");
-      void lid;
-    });
   }
 
-  async function handleDirectTerminalSend() {
-    const text = el.directTermInput.value.trim();
-    if (!text) return;
-    el.directTermInput.value = "";
-
-    if (state.backendMode === "live") {
-      const resp = await callBackend("/api/terminal/input", { text, source: "user" });
-      appendUnimplementedCard("POST /api/terminal/input", resp.message);
-      return;
-    }
-
-    appendTerminalLine(text, "user", "user");
-    if (state.mode === "autonomous" && state.engineState !== "user") {
-      state.engineState = "user";
-      renderStatus();
-      toast("直接入力を検知したため AutoAI が操作権を譲りました");
-    }
-    schedule(350, () => {
-      appendTerminalLine(`> Executed direct user input: ${text}`, "agent");
-    });
-  }
-
-  // ========== Wire Events ==========
-  el.sendChatBtn.addEventListener("click", handleSendChat);
+  // Wire buttons
+  el.sendChatBtn.addEventListener("click", sendChat);
   el.chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSendChat();
+      sendChat();
     }
   });
 
   document.querySelectorAll(".chip").forEach((chip) => {
     chip.addEventListener("click", () => {
       el.chatInput.value = chip.dataset.prompt;
-      handleSendChat();
+      sendChat();
     });
   });
 
-  el.sendDirectBtn.addEventListener("click", handleDirectTerminalSend);
-  el.directTermInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      handleDirectTerminalSend();
+  el.agentPreset.addEventListener("change", () => {
+    el.customCmdInput.classList.toggle("hidden", el.agentPreset.value !== "custom");
+  });
+
+  el.startTermBtn.addEventListener("click", () => startTerminalWith(null));
+  $("quickLaunchClaude").addEventListener("click", () => startTerminalWith("claude"));
+  $("quickLaunchGemini").addEventListener("click", () => startTerminalWith("gemini"));
+  $("quickLaunchAgy").addEventListener("click", () => startTerminalWith("agy"));
+  $("quickLaunchPwsh").addEventListener("click", () => startTerminalWith("pwsh"));
+
+  el.stopTermBtn.addEventListener("click", async () => {
+    await postJson("/api/terminal/stop");
+    toast("ターミナルを停止しました", "warn");
+  });
+
+  el.ctrlCBtn.addEventListener("click", async () => {
+    await postJson("/api/terminal/interrupt");
+    toast("Ctrl+C を送信しました", "warn");
+  });
+
+  el.evalNowBtn.addEventListener("click", async () => {
+    toast("現在のターミナル画面を AutoAI に解析させています...");
+    const res = await postJson("/api/monitor/evaluate");
+    if (res.decision) {
+      toast(`判定結果: ${res.decision} — ${res.reason || ""}`);
     }
   });
 
-  el.terminalViewport.addEventListener("click", () => {
-    el.directTermInput.focus();
-  });
-
-  // Mode segmented buttons
-  document.querySelectorAll(".seg-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const mode = btn.dataset.mode;
-      state.mode = mode;
-      state.engineState = mode === "autonomous" ? "watching" : mode;
-      renderStatus();
-      if (state.backendMode === "live") {
-        const resp = await callBackend("/api/monitor/mode", { mode });
-        appendUnimplementedCard("POST /api/monitor/mode", resp.message);
-      } else {
-        toast(`動作モードを「${btn.textContent}」に切り替えました`);
-      }
-    });
-  });
-
-  el.resumeAutoBtn.addEventListener("click", () => {
-    state.mode = "autonomous";
-    state.engineState = "watching";
-    renderStatus();
+  el.resumeAutoBtn.addEventListener("click", async () => {
+    await postJson("/api/monitor/resume");
     toast("自律監視を再開しました");
   });
 
-  // Backend mode toggle (UX Demo vs Live API Not-Implemented check)
-  el.backendModeBtn.addEventListener("click", () => {
-    state.backendMode = state.backendMode === "demo" ? "live" : "demo";
-    el.backendModeBtn.textContent =
-      state.backendMode === "demo" ? "モード: UXデモ" : "モード: 実API(未実装確認)";
-    toast(
-      state.backendMode === "demo"
-        ? "UXデモモード: シナリオと対話モックで動作します"
-        : "実APIモード: 操作するとバックエンドの「未実装」応答を確認できます",
-      state.backendMode === "live" ? "warn" : "info"
-    );
+  document.querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await postJson("/api/monitor/mode", { mode: btn.dataset.mode });
+      toast(`モードを「${btn.textContent}」に切り替えました`);
+    });
   });
 
-  // Terminal toolbar actions
-  $("startTermBtn").addEventListener("click", async () => {
-    const preset = $("agentPreset").value;
-    const cwd = $("cwdInput").value;
-    if (state.backendMode === "live") {
-      const resp = await callBackend("/api/terminal/start", { agent_preset: preset, cwd });
-      appendUnimplementedCard("POST /api/terminal/start", resp.message);
-      return;
-    }
-    appendTerminalLine(`--- Restarting PTY preset=${preset} cwd=${cwd} ---`, "system");
-    appendTerminalLine(`$ ${preset}`, "agent");
-    toast(`${preset} の起動をシミュレートしました`);
-  });
-
-  $("ctrlCBtn").addEventListener("click", async () => {
-    if (state.backendMode === "live") {
-      const resp = await callBackend("/api/terminal/interrupt", {});
-      appendUnimplementedCard("POST /api/terminal/interrupt", resp.message);
-      return;
-    }
-    appendTerminalLine("^C", "danger", "user");
-    state.engineState = "user";
-    renderStatus();
-    toast("Ctrl+C を送信しました（AutoAI は一時待機）", "warn");
-  });
-
-  $("clearTermBtn").addEventListener("click", () => {
-    el.terminalLines.innerHTML = "";
-    appendTerminalLine("Terminal view cleared.", "system");
-  });
-
-  // Model selector sync
-  el.modelSelect.addEventListener("change", () => {
-    state.model = el.modelSelect.value;
-    el.settingsModelSelect.value = state.model;
-    renderStatus();
-    toast(`使用モデルを ${state.model} に変更しました`);
-  });
-
-  // Scenarios
-  $("btnScenarioA").addEventListener("click", runScenarioA);
-  $("btnScenarioB").addEventListener("click", runScenarioB);
-  $("btnScenarioC").addEventListener("click", runScenarioC);
-  $("btnScenarioReset").addEventListener("click", () => {
-    seedInitialState();
-    toast("初期デモ状態にリセットしました");
-  });
-  $("toggleScenarioBtn").addEventListener("click", () => {
-    $("scenarioBar").classList.add("hidden");
+  el.modelSelect.addEventListener("change", async () => {
+    const model = el.modelSelect.value;
+    el.settingsModelSelect.value = model;
+    await postJson("/api/settings", {
+      ollama_url: state.status.ollama_url,
+      model,
+      idle_threshold_sec: state.status.idle_threshold_sec,
+    });
+    toast(`使用モデルを ${model} に変更しました`);
   });
 
   // Mission collapse & edit
@@ -753,34 +566,26 @@
   });
 
   $("editMissionBtn").addEventListener("click", () => {
-    $("editGoalInput").value = state.mission.goal;
-    $("editPolicyInput").value = state.mission.policy;
-    $("editBoundariesInput").value = state.mission.boundaries.join(", ");
+    $("editGoalInput").value = state.mission.goal || "";
+    $("editPolicyInput").value = state.mission.policy || "";
+    $("editBoundariesInput").value = (state.mission.boundaries || []).join(", ");
     $("missionModal").classList.remove("hidden");
   });
 
   $("saveMissionBtn").addEventListener("click", async () => {
-    state.mission.goal = $("editGoalInput").value.trim() || state.mission.goal;
-    state.mission.policy = $("editPolicyInput").value.trim() || state.mission.policy;
-    state.mission.boundaries = $("editBoundariesInput")
-      .value.split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    renderMission();
+    const goal = $("editGoalInput").value.trim();
+    const policy = $("editPolicyInput").value.trim();
+    const boundaries = $("editBoundariesInput").value.split(",").map((s) => s.trim()).filter(Boolean);
+    await postJson("/api/mission", { goal, policy, boundaries });
     $("missionModal").classList.add("hidden");
-    if (state.backendMode === "live") {
-      const resp = await callBackend("/api/mission", state.mission);
-      appendUnimplementedCard("POST /api/mission", resp.message);
-    } else {
-      toast("ミッション（自律判断基準）を更新しました");
-    }
+    toast("ミッションを更新しました");
   });
 
   // Settings modal
   $("settingsBtn").addEventListener("click", () => {
-    $("ollamaUrlInput").value = state.ollamaUrl;
-    $("idleThresholdRange").value = String(state.idleThresholdSec);
-    $("idleThresholdVal").textContent = `${state.idleThresholdSec.toFixed(1)}秒`;
+    $("ollamaUrlInput").value = state.status.ollama_url || "http://127.0.0.1:11434";
+    $("idleThresholdRange").value = String(state.status.idle_threshold_sec || 2.5);
+    $("idleThresholdVal").textContent = `${Number(state.status.idle_threshold_sec || 2.5).toFixed(1)}秒`;
     $("settingsModal").classList.remove("hidden");
   });
 
@@ -792,15 +597,14 @@
     loadModels($("ollamaUrlInput").value.trim());
   });
 
-  $("saveSettingsBtn").addEventListener("click", () => {
-    state.ollamaUrl = $("ollamaUrlInput").value.trim() || state.ollamaUrl;
-    state.model = el.settingsModelSelect.value || DEFAULT_MODEL;
-    el.modelSelect.value = state.model;
-    state.idleThresholdSec = Number($("idleThresholdRange").value);
+  $("saveSettingsBtn").addEventListener("click", async () => {
+    const ollama_url = $("ollamaUrlInput").value.trim();
+    const model = el.settingsModelSelect.value || DEFAULT_MODEL;
+    const idle_threshold_sec = Number($("idleThresholdRange").value);
+    await postJson("/api/settings", { ollama_url, model, idle_threshold_sec });
+    el.modelSelect.value = model;
     $("settingsModal").classList.add("hidden");
-    renderStatus();
-    renderMonitorMetrics();
-    toast(`設定を適用しました (${state.model})`);
+    toast(`設定を適用しました (${model})`);
   });
 
   document.querySelectorAll(".modal-close, [data-close]").forEach((btn) => {
@@ -810,35 +614,7 @@
     });
   });
 
-  // Session switcher
-  $("sessionSelect").addEventListener("change", (e) => {
-    if (e.target.value === "s2") {
-      state.mission.goal = "既存モジュールの重複コードを整理し、回帰テストを全通過させる";
-      seedInitialState();
-      toast("セッション #2 に切り替えました");
-    } else {
-      state.mission.goal = "ログイン API にメール形式・パスワード強度バリデーションを追加し、pytest を全件通過させる";
-      seedInitialState();
-      toast("セッション #1 に切り替えました");
-    }
-  });
-
-  $("newSessionBtn").addEventListener("click", () => {
-    const sel = $("sessionSelect");
-    const n = sel.options.length + 1;
-    const opt = document.createElement("option");
-    opt.value = `s${n}`;
-    opt.textContent = `#${n} 新規セッション`;
-    sel.appendChild(opt);
-    sel.value = opt.value;
-    el.chatTimeline.innerHTML = "";
-    el.terminalLines.innerHTML = "";
-    appendChatMessage("ai", "新規セッションを開始しました。達成したい目的を教えてください。");
-    appendTerminalLine("Ready. Waiting for mission or agent startup...", "system");
-    toast(`新規セッション #${n} を作成しました`);
-  });
-
-  // Draggable Splitter
+  // Draggable Splitter + ResizeObserver for xterm.js fit
   const splitter = $("splitter");
   const paneChat = $("paneChat");
   const workspace = $("workspace");
@@ -855,8 +631,9 @@
     if (!dragging) return;
     const rect = workspace.getBoundingClientRect();
     const pct = ((e.clientX - rect.left) / rect.width) * 100;
-    const clamped = Math.min(68, Math.max(26, pct));
+    const clamped = Math.min(62, Math.max(24, pct));
     paneChat.style.width = `${clamped}%`;
+    sendTerminalResize();
   });
 
   window.addEventListener("mouseup", () => {
@@ -865,9 +642,23 @@
     splitter.classList.remove("dragging");
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
+    sendTerminalResize();
   });
 
+  window.addEventListener("resize", () => sendTerminalResize());
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => sendTerminalResize()).observe($("xtermStage"));
+  }
+
   // Boot
-  seedInitialState();
-  loadModels();
+  fetch("/api/state")
+    .then((r) => r.json())
+    .then((full) => {
+      applyFullState(full);
+      loadModels(full.status?.ollama_url);
+      connectTerminalWs();
+      connectEventsWs();
+      setTimeout(sendTerminalResize, 120);
+    })
+    .catch((err) => toast(`初期化エラー: ${err}`, "error"));
 })();
