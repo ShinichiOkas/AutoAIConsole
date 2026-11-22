@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,15 @@ from autoaiconsole import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, __version__
 from autoaiconsole.ollama_client import fetch_ollama_models
 from autoaiconsole.session import ConsoleSession
 
-WEB_DIR = Path(__file__).resolve().parent / "web"
+
+def _resolve_web_dir() -> Path:
+    """Locate bundled static files (PyInstaller onefile extracts them under sys._MEIPASS)."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "autoaiconsole" / "web"  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parent / "web"
+
+
+WEB_DIR = _resolve_web_dir()
 
 session = ConsoleSession()
 

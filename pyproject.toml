@@ -24,6 +24,9 @@ gui = [
 pty = [
     "pywinpty>=2.0; sys_platform == 'win32'",
 ]
+build = [
+    "pyinstaller>=6.10",
+]
 
 [project.scripts]
 autoaiconsole = "autoaiconsole.gui:main"

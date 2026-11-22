@@ -21,6 +21,17 @@ launch_gui.bat
 launch_gui.bat --browser
 ```
 
+## 単体 exe のビルドとインストール
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
+```
+
+- PyInstaller（`pip install -e .[build]`、未導入なら自動）で `dist\autoaiconsole.exe`（onefile・console）を作り、PATH 上へコピーする
+- インストール先の優先順: `-InstallDir <パス>` → 環境変数 `AGENT_INSTALL_DIR` → `%USERPROFILE%\.local\bin`
+- 最後に `autoaiconsole.exe --server-only --port 18799` を起動して `/api/health`・`/`・静的ファイルを確かめる（`-SkipVerify` で省略、`-VerifyPort` で変更）
+- 起動: `autoaiconsole`（pywebview ウィンドウ）/ `autoaiconsole --browser` / `autoaiconsole --server-only --port <n>`
+
 ## ドキュメント
 
 - [UX 設計書](docs/ux_design.md)
