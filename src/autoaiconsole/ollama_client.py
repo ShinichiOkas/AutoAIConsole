@@ -188,9 +188,11 @@ async def evaluate_terminal_screen(
    - Agent が思考中・読み込み中・コマンド実行中（例: `Loading...`, `Thinking`, スピナー `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, `Running`, 出力途中）。
    - まだ何もタスクを投入していない初期プロンプトや、判断材料が無い場合。
 2. **respond**:
-   - Agent が通常の確認・許可・選択・質問で入力待ちになっている（例: `(Y/n)`, `[y/N]`, `Allow ...?`, `Approve`, `Continue?`, 選択肢 `1/2/3`, 実装方針の軽い確認、エラー修正の継続確認）。
+   - Agent が通常の確認・許可・選択・質問で入力待ちになっている（例: `(Y/n)`, `[y/N]`, `Allow ...?`, `Approve`, `Continue?`, `Yes, I trust this folder`, 選択肢 `1/2/3`, 実装方針の軽い確認、エラー修正の継続確認）。
    - ミッションの目的に照らして、最も自然で前進する回答を `input_text` に指定する。
-   - TUI で選択肢をそのまま確定するだけなら `input_text: ""`, `press_enter: true` または `"y"` 等、画面のプロンプト形式に正確に合わせる。
+   - **TUI メニュー選択（`❯` カーソル移動）に注意**: 画面に `❯ No, exit` と `  Yes, I trust this folder` のように `❯` で現在行が示されている選択メニューでは、目的の項目に `❯` が合っていなければそのまま Enter を押さないこと（`No, exit` を選んで終了してしまう）。下の項目を選ぶには `input_text: "<down><enter>"`, `press_enter: false` のように矢印キー（`<down>`, `<up>`, `<left>`, `<right>`, `<tab>`, `<esc>`）と `<enter>` トークンを組み合わせて指定する。
+   - 番号付き選択肢（例: `1. Yes` / `2. Yes, allow ...`）の場合は画面の操作説明に合わせて `"1"` や `"<enter>"` 等を使う。
+   - 通常のプロンプト入力では文字列を `input_text` に入れ `press_enter: true` にする（`input_text` 内に `<enter>` を含めた場合は `press_enter: false` にする）。
 3. **boundary**:
    - 停止境界に該当する不可逆・破壊的操作（`git push --force`, 大量削除 `rm -rf`, 本番DB/外部デプロイ変更, 機密送信）や、ユーザー固有の価値判断が必要な大幅分岐を Agent が提案している場合のみ。
    - この場合は絶対に自動送信せず、ユーザーへ相談する情報（`boundary_title`, `risk_reason`, `recommendation`, `recommended_input`）を返す。

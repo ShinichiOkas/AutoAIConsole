@@ -1,8 +1,10 @@
 """Core integration tests for AutoAIConsole ConPTY + pyte + FastAPI server."""
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
+import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -63,3 +65,41 @@ def test_server_health_and_state() -> None:
         assert "mission" in data
         assert "presets" in data
         assert len(data["presets"]) >= 5
+
+
+class CoreUnitTests(unittest.TestCase):
+    def test_protocol_reply_filter(self) -> None:
+        test_terminal_protocol_reply_filter()
+
+    def test_real_conpty_roundtrip(self) -> None:
+        test_pty_manager_real_conpty_roundtrip()
+
+    def test_server_health(self) -> None:
+        test_server_health_and_state()
+
+    def test_send_text_async_key_tokens(self) -> None:
+        written: list[str] = []
+
+        class DummyPty(PtyManager):
+            @property
+            def is_running(self) -> bool:
+                return True
+
+            def write(self, data: str) -> bool:
+                written.append(data)
+                return True
+
+        pty = DummyPty()
+        ok = asyncio.run(pty.send_text_async("<down><enter>", press_enter=True))
+        self.assertTrue(ok)
+        self.assertEqual(written, ["\x1b[B", "\r"])
+
+        written.clear()
+        ok = asyncio.run(pty.send_text_async("hello", press_enter=True))
+        self.assertTrue(ok)
+        self.assertEqual(written, ["hello", "\r"])
+
+        written.clear()
+        ok = asyncio.run(pty.send_text_async("<down>", press_enter=False))
+        self.assertTrue(ok)
+        self.assertEqual(written, ["\x1b[B"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import threading
 import time
@@ -220,30 +221,58 @@ class PtyManager:
             return False
 
     async def send_text_async(self, text: str, press_enter: bool = True) -> bool:
-        """Write text to PTY; send CR after a brief pause so TUI agents reliably submit."""
+        """Write text/key-tokens to PTY; pause between key tokens so TUI agents reliably process them."""
         if not self.is_running:
             return False
-        # Support special key tokens from LLM decisions
-        normalized = text.strip().lower()
-        special_map = {
+
+        token_map = {
             "<enter>": "\r",
-            "enter": "\r",
+            "<return>": "\r",
             "<esc>": "\x1b",
+            "<escape>": "\x1b",
             "<up>": "\x1b[A",
             "<down>": "\x1b[B",
+            "<right>": "\x1b[C",
+            "<left>": "\x1b[D",
             "<tab>": "\t",
+            "<space>": " ",
+            "<backspace>": "\x7f",
             "<ctrl+c>": "\x03",
+        }
+        # Also handle legacy single-word special tokens without angle brackets
+        bare_map = {
+            "enter": "\r",
             "ctrl+c": "\x03",
         }
-        if normalized in special_map:
-            return self.write(special_map[normalized])
+        stripped = text.strip()
+        if stripped.lower() in bare_map:
+            return self.write(bare_map[stripped.lower()])
 
-        if text:
-            ok = self.write(text)
-            if not ok:
-                return False
-        if press_enter:
-            await asyncio.sleep(0.08)
+        token_pattern = re.compile(
+            r"(<(?:enter|return|esc|escape|up|down|right|left|tab|space|backspace|ctrl\+c)>)",
+            re.IGNORECASE,
+        )
+        parts = [p for p in token_pattern.split(text) if p] if text else []
+        sent_enter_token = False
+
+        for idx, part in enumerate(parts):
+            lower = part.lower()
+            if lower in token_map:
+                if not self.write(token_map[lower]):
+                    return False
+                if lower in ("<enter>", "<return>"):
+                    sent_enter_token = True
+            else:
+                if not self.write(part):
+                    return False
+                if part.endswith(("\r", "\n")):
+                    sent_enter_token = True
+            if idx < len(parts) - 1:
+                await asyncio.sleep(0.06)
+
+        if press_enter and not sent_enter_token:
+            if parts:
+                await asyncio.sleep(0.08)
             return self.write("\r")
         return True
 
