@@ -103,3 +103,17 @@ class CoreUnitTests(unittest.TestCase):
         ok = asyncio.run(pty.send_text_async("<down>", press_enter=False))
         self.assertTrue(ok)
         self.assertEqual(written, ["\x1b[B"])
+
+    def test_estimate_prompt_confidence_skips_separators(self) -> None:
+        from autoaiconsole.session import ConsoleSession
+
+        s = ConsoleSession()
+        screen = "Working on task...\n─────────────\n"
+        conf, trigger = s._estimate_prompt_confidence(screen, silence=1.0)
+        self.assertEqual(trigger, "Working on task...")
+        self.assertLess(conf, 60)
+
+        busy_screen = "⠋ Compiling assets...\n─────────────\n"
+        conf_busy, trigger_busy = s._estimate_prompt_confidence(busy_screen, silence=1.0)
+        self.assertEqual(conf_busy, 12)
+        self.assertIn("Compiling", trigger_busy)

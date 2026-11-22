@@ -429,8 +429,11 @@ class ConsoleSession:
     def _estimate_prompt_confidence(self, screen_text: str, silence: float) -> tuple[int, str]:
         if not screen_text.strip():
             return 0, "(出力なし)"
-        tail = "\n".join(screen_text.splitlines()[-8:])
-        last_line = next((ln.strip() for ln in reversed(screen_text.splitlines()) if ln.strip()), "")
+        lines = [ln.strip() for ln in screen_text.splitlines() if ln.strip()]
+        # Skip pure box-drawing / separator lines so last_trigger shows meaningful content
+        meaningful = [ln for ln in lines if not re.fullmatch(r"[─━═\-_=·.\s]+", ln)]
+        last_line = meaningful[-1] if meaningful else (lines[-1] if lines else "")
+        tail = "\n".join(lines[-8:])
 
         if BUSY_HINTS.search(tail):
             return 12, last_line[:90]
@@ -561,6 +564,11 @@ class ConsoleSession:
                         self.confidence = conf
                         if hint:
                             self.last_trigger = hint
+                        run_sec = max(0, int(now - self.pty.started_at)) if self.pty.started_at else 0
+                        if conf <= 15 and silence < self.idle_threshold_sec:
+                            self.last_eval_note = f"{self.pty.command_display} 作業中 (稼働 {run_sec}s / 無音 {silence:.1f}s)"
+                        elif silence < self.idle_threshold_sec:
+                            self.last_eval_note = f"出力ストリーム監視中 (無音 {silence:.1f}s / 閾値 {self.idle_threshold_sec:.1f}s)"
 
                     # Live feedback tick every 1 second
                     if now - last_tick_emit >= 1.0:
